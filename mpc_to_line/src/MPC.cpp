@@ -10,9 +10,9 @@ namespace plt = matplotlibcpp;
 
 using CppAD::AD;
 
-// TODO: Set N and dt
-size_t N = ? ;
-double dt = ? ;
+// DONE: Set N and dt
+size_t N = 15 ;
+double dt = 0.05 ;
 
 // This value assumes the model presented in the classroom is used.
 //
@@ -39,6 +39,9 @@ size_t psi_start = y_start + N;
 size_t v_start = psi_start + N;
 size_t cte_start = v_start + N;
 size_t epsi_start = cte_start + N;
+
+// Only consider the actuation at time until N-1 because
+// actuating at N will only have an effect falling in the future at N+1.
 size_t delta_start = epsi_start + N;
 size_t a_start = delta_start + N - 1;
 
@@ -57,9 +60,22 @@ class FG_eval {
     fg[0] = 0;
 
     // Reference State Cost
-    // TODO: Define the cost related the reference state and
+    // DONE: Define the cost related the reference state and
     // any anything you think may be beneficial.
+    for (int t = 0; t < N; t++) {
+      fg[0] += CppAD::pow(vars[cte_start + t], 2);
+      fg[0] += CppAD::pow(vars[epsi_start + t], 2);
+      fg[0] += CppAD::pow(vars[v_start + t] - ref_v, 2);
 
+      // Thinking ways of smoothing trajectory
+      if(t>0){
+        // Cost on change of actuation?
+        fg[0] += CppAD::pow(vars[delta_start + t] - vars[epsi_start - 1], 2);
+        // Cost on change of steering position?
+        fg[0] += CppAD::pow(vars[a_start + t] - vars[a_start + t], 2);
+      }
+
+    }
     //
     // Setup Constraints
     //
@@ -79,11 +95,24 @@ class FG_eval {
 
     // The rest of the constraints
     for (int t = 1; t < N; t++) {
+      // Mapping variables to easy to read names
       AD<double> x1 = vars[x_start + t];
+      AD<double> y1 = vars[y_start + t];
+      AD<double> psi1 = vars[psi_start + t];
+      AD<double> v1 = vars[v_start + t];
+      AD<double> cte0 = vars[cte_start + t];
+      AD<double> epsi1 = vars[epsi_start + t];
 
       AD<double> x0 = vars[x_start + t - 1];
+      AD<double> y0 = vars[y_start + t - 1];
       AD<double> psi0 = vars[psi_start + t - 1];
       AD<double> v0 = vars[v_start + t - 1];
+      AD<double> cte1 = vars[cte_start + t - 1];
+      AD<double> epsi0 = vars[epsi_start + t - 1];
+
+
+      AD<double> delta = vars[delta_start + t];
+      AD<double> acc = vars[a_start + t];
 
       // Here's `x` to get you started.
       // The idea here is to constraint this value to be 0.
@@ -94,6 +123,24 @@ class FG_eval {
 
       // TODO: Setup the rest of the model constraints
       fg[1 + x_start + t] = x1 - (x0 + v0 * CppAD::cos(psi0) * dt);
+      fg[1 + y_start + t] = y1 - (y0 + v0 * CppAD::sin(psi0) * dt);
+      fg[1 + psi_start + t] = psi1 - (psi0 + v0/Lf * delta * dt);
+      fg[1 + v_start + t] = v1 - (v0 + acc * dt);
+
+      // Calculating constraints on the errors
+      AD<double> f_y = 0.0;
+      for (int deg = 0; deg < coeffs.size(); ++deg) {
+        f_y += coeffs[deg] * CppAD::pow(x0, deg);
+      }
+      fg[1 + cte_start + t] = f_y  - y0 + v0 * CppAD::sin(epsi0)*dt;
+
+      AD<double> Df_y = 0.0;
+      for(int order=1; order<coeffs.size(); ++order){
+        Df_y += order * CppAD::pow(x0, (double) order - 1.0);
+      }
+      AD<double> psi_dest = CppAD::tan(Df_y);
+      fg[1 + epsi_start + t] = psi0 + v0/Lf * delta * dt  - psi_dest ; // TODO : why is the sign not the opposite ? Experiment with along with TODO line 323
+
     }
   }
 };
@@ -257,23 +304,32 @@ int main() {
   MPC mpc;
   int iters = 50;
 
-  Eigen::VectorXd ptsx(2);
-  Eigen::VectorXd ptsy(2);
-  ptsx << -100, 100;
-  ptsy << -1, -1;
+  Eigen::VectorXd ptsx(4);
+  Eigen::VectorXd ptsy(4);
+  ptsx << -100, -50, 0, 100;
+  ptsy << -1, -1, -1, -1;
 
-  // TODO: fit a polynomial to the above x and y coordinates
-  auto coeffs = ? ;
+  // fit a polynomial to the above x and y coordinates
+  auto coeffs = polyfit(ptsx, ptsy, 2) ;
 
-  // NOTE: free feel to play around with these
+  // Calculate the initial state values for the problem
   double x = -1;
   double y = 10;
   double psi = 0;
   double v = 10;
-  // TODO: calculate the cross track error
-  double cte = ? ;
-  // TODO: calculate the orientation error
-  double epsi = ? ;
+  // calculate the cross track error
+  //  It is calculated using the track as a reference
+  double cte = polyeval(coeffs,x) - y;
+  // calculate the initial orientation error
+  // The objective orientation is given by : psi = tan(f'(x))
+  // Here f(x) is a 2nd order poly
+  // f'(x) = 2*coeffs[2] + coeffs[1]
+  double Df_y = 0.0;
+  for(int order=1; order<coeffs.size(); ++order){
+    Df_y += order*pow(x, (double) order-1.0);
+  }
+  double epsi =  -(tan(Df_y) - psi); //TODO: Not sure why orientation sign must be negated
+
 
   Eigen::VectorXd state(6);
   state << x, y, psi, v, cte, epsi;
