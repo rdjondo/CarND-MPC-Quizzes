@@ -1,5 +1,5 @@
 #include "MPC.h"
-#include <math.h>
+#include <cmath>
 #include <cppad/cppad.hpp>
 #include <cppad/ipopt/solve.hpp>
 #include "Eigen-3.3/Eigen/Core"
@@ -159,17 +159,17 @@ class FG_eval {
         f_y1 += coeffs[deg] * x_power;
         x_power = x_power * x1;
       }
-      fg[1 + cte_start + t] = cte1 - (f_y1  - y1); 
+      fg[1 + cte_start + t] = cte1 - (f_y1  - y1);
 
       // Computing 1st derivative evaluation on the objective function
-      AD<double> Df_y = coeffs[1]*x1;
+      AD<double> Df_y = coeffs[1];
       AD<double> x_power_prime = x1;
       for(int deg=2; deg<coeffs.size(); ++deg){
         Df_y += deg * coeffs[deg] * x_power_prime;
-        x_power_prime = x_power_prime * x0;
+        x_power_prime = x_power_prime * x1;
       }
-      AD<double> psi_dest = CppAD::tan(Df_y);
-      fg[1 + epsi_start + t] = epsi1 - (psi1  - psi_dest ); // TODO : why is the sign not the opposite ? Experiment with along with TODO line 368
+      AD<double> psi_dest = CppAD::atan(Df_y);
+      fg[1 + epsi_start + t] = epsi1 - (psi_dest - psi1);
 
     }
   }
@@ -357,15 +357,17 @@ int main() {
   double cte = polyeval(coeffs,x) - y;
 
   // Calculate the initial orientation error for the objective function.
-  // The objective orientation is given by : psi = tan(f'(x))
+  // The objective orientation is given by : psi = atan(f'(x))
   // Here f(x) is a 2nd order poly
   // f'(x) = 2*coeffs[2] + coeffs[1]
-  double Df_y = coeffs[1]*x;
-  double x_power = x;
+  double Df_y = coeffs[1];
+  double x_power_prime = x;
   for(int deg=2; deg<coeffs.size(); ++deg){
-    Df_y += deg * coeffs[deg] * x_power;
+    Df_y += deg * coeffs[deg] * x_power_prime;
+    x_power_prime = x_power_prime * x;
   }
-  double epsi =  -(tan(Df_y) - psi); //TODO: Not sure why orientation sign must be negated
+
+  double epsi =  (atan(Df_y) - psi);
 
 
   Eigen::VectorXd state(6);
@@ -416,7 +418,7 @@ int main() {
     std::cout << "x = " << vars[0] << std::endl;
     std::cout << "y = " << vars[1] << std::endl;
     std::cout << "psi = " << vars[2] << std::endl;
-    std::cout << "v = " << vars[v_start] << std::endl;
+    std::cout << "v = " << vars[3] << std::endl;
     std::cout << "cte = " << vars[4] << std::endl;
     std::cout << "epsi = " << vars[5] << std::endl;
     std::cout << "delta = " << vars[6] << std::endl;
