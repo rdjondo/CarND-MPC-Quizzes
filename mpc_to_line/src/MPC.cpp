@@ -6,12 +6,14 @@
 #include "Eigen-3.3/Eigen/QR"
 #include "matplotlibcpp.h"
 
+#include <chrono>
+
 namespace plt = matplotlibcpp;
 
 using CppAD::AD;
 
 // DONE: Set N and dt
-size_t N = 15 ;
+size_t N = 20 ;
 double dt = 0.05 ;
 
 // This value assumes the model presented in the classroom is used.
@@ -46,10 +48,24 @@ size_t delta_start = epsi_start + N;
 size_t a_start = delta_start + N - 1;
 
 class FG_eval {
+ private:
+  double acc_last_value = 0.0;
+  double delta_last_value = 0.0;
+
+
  public:
   Eigen::VectorXd coeffs;
   // Coefficients of the fitted polynomial.
   FG_eval(Eigen::VectorXd coeffs) { this->coeffs = coeffs; }
+
+  void setAcc_last_value(double acc_last_value) {
+    FG_eval::acc_last_value = acc_last_value;
+  }
+
+  void setDelta_last_value(double delta_last_value) {
+    FG_eval::delta_last_value = delta_last_value;
+  }
+
 
   typedef CPPAD_TESTVECTOR(AD<double>) ADvector;
   // `fg` is a vector containing the cost and constraints.
@@ -67,15 +83,22 @@ class FG_eval {
       fg[0] += CppAD::pow(vars[epsi_start + t], 2);
       fg[0] += CppAD::pow(vars[v_start + t] - ref_v, 2);
 
-      // Thinking ways of smoothing trajectory
-      if(t>0){
-        // Cost on change of actuation?
-        fg[0] += CppAD::pow(vars[delta_start + t] - vars[epsi_start - 1], 2);
-        // Cost on change of steering position?
-        fg[0] += CppAD::pow(vars[a_start + t] - vars[a_start + t], 2);
-      }
-
     }
+
+    // Minimize the use of actuators.
+    for (int t = 0; t < N - 1; t++) {
+      //fg[0] += CppAD::pow(vars[delta_start + t], 2);
+      //fg[0] += CppAD::pow(vars[a_start + t], 2);
+    }
+
+    // Minimize the value gap between sequential actuations.
+    fg[0] += CppAD::pow(acc_last_value - vars[a_start], 2);
+    fg[0] += CppAD::pow(delta_last_value - vars[delta_start], 2);
+    for (int t = 0; t < N - 2; t++) {
+      fg[0] += CppAD::pow(vars[delta_start + t + 1] - vars[delta_start + t], 2);
+      fg[0] += CppAD::pow(vars[a_start + t + 1] - vars[a_start + t], 2);
+    }
+
     //
     // Setup Constraints
     //
@@ -100,19 +123,19 @@ class FG_eval {
       AD<double> y1 = vars[y_start + t];
       AD<double> psi1 = vars[psi_start + t];
       AD<double> v1 = vars[v_start + t];
-      AD<double> cte0 = vars[cte_start + t];
+      AD<double> cte1 = vars[cte_start + t];
       AD<double> epsi1 = vars[epsi_start + t];
 
       AD<double> x0 = vars[x_start + t - 1];
       AD<double> y0 = vars[y_start + t - 1];
       AD<double> psi0 = vars[psi_start + t - 1];
       AD<double> v0 = vars[v_start + t - 1];
-      AD<double> cte1 = vars[cte_start + t - 1];
+      AD<double> cte0 = vars[cte_start + t - 1];
       AD<double> epsi0 = vars[epsi_start + t - 1];
 
 
-      AD<double> delta = vars[delta_start + t];
-      AD<double> acc = vars[a_start + t];
+      AD<double> delta = vars[delta_start + t - 1];
+      AD<double> acc = vars[a_start + t - 1];
 
       // Here's `x` to get you started.
       // The idea here is to constraint this value to be 0.
@@ -121,25 +144,32 @@ class FG_eval {
       // This is also CppAD can compute derivatives and pass
       // these to the solver.
 
-      // TODO: Setup the rest of the model constraints
+      // Setup the rest of the model constraints
       fg[1 + x_start + t] = x1 - (x0 + v0 * CppAD::cos(psi0) * dt);
       fg[1 + y_start + t] = y1 - (y0 + v0 * CppAD::sin(psi0) * dt);
       fg[1 + psi_start + t] = psi1 - (psi0 + v0/Lf * delta * dt);
       fg[1 + v_start + t] = v1 - (v0 + acc * dt);
 
-      // Calculating constraints on the errors
-      AD<double> f_y = 0.0;
-      for (int deg = 0; deg < coeffs.size(); ++deg) {
-        f_y += coeffs[deg] * CppAD::pow(x0, deg);
-      }
-      fg[1 + cte_start + t] = f_y  - y0 + v0 * CppAD::sin(epsi0)*dt;
+      // Calculating costs on the errors
 
-      AD<double> Df_y = 0.0;
-      for(int order=1; order<coeffs.size(); ++order){
-        Df_y += order * CppAD::pow(x0, (double) order - 1.0);
+      // Computing polynomial evaluation on the objective function
+      AD<double> f_y1 = coeffs[0];
+      AD<double> x_power = x1;
+      for (int deg = 1; deg < coeffs.size(); ++deg) {
+        f_y1 += coeffs[deg] * x_power;
+        x_power = x_power * x1;
+      }
+      fg[1 + cte_start + t] = cte1 - (f_y1  - y1); 
+
+      // Computing 1st derivative evaluation on the objective function
+      AD<double> Df_y = coeffs[1]*x1;
+      AD<double> x_power_prime = x1;
+      for(int deg=2; deg<coeffs.size(); ++deg){
+        Df_y += deg * coeffs[deg] * x_power_prime;
+        x_power_prime = x_power_prime * x0;
       }
       AD<double> psi_dest = CppAD::tan(Df_y);
-      fg[1 + epsi_start + t] = psi0 + v0/Lf * delta * dt  - psi_dest ; // TODO : why is the sign not the opposite ? Experiment with along with TODO line 323
+      fg[1 + epsi_start + t] = epsi1 - (psi1  - psi_dest ); // TODO : why is the sign not the opposite ? Experiment with along with TODO line 368
 
     }
   }
@@ -152,7 +182,7 @@ class FG_eval {
 MPC::MPC() {}
 MPC::~MPC() {}
 
-vector<double> MPC::Solve(Eigen::VectorXd x0, Eigen::VectorXd coeffs) {
+vector<double> MPC::Solve(Eigen::VectorXd x0, Eigen::VectorXd coeffs, double acc_last_value, double delta_last_value) {
   size_t i;
   typedef CPPAD_TESTVECTOR(double) Dvector;
 
@@ -234,12 +264,16 @@ vector<double> MPC::Solve(Eigen::VectorXd x0, Eigen::VectorXd coeffs) {
 
   // Object that computes objective and constraints
   FG_eval fg_eval(coeffs);
+  fg_eval.setAcc_last_value(acc_last_value);
+  fg_eval.setDelta_last_value(delta_last_value);
 
   // options
   std::string options;
   options += "Integer print_level  0\n";
-  options += "Sparse  true        forward\n";
-  options += "Sparse  true        reverse\n";
+  options += "Sparse  true         forward\n";
+  options += "Sparse  true         reverse\n";
+  //options += "Integer max_iter     100\n";
+  options += "Numeric max_cpu_time 0.25\n";
 
   // place to return solution
   CppAD::ipopt::solve_result<Dvector> solution;
@@ -302,15 +336,16 @@ Eigen::VectorXd polyfit(Eigen::VectorXd xvals, Eigen::VectorXd yvals,
 
 int main() {
   MPC mpc;
-  int iters = 50;
+  int iters = 110;
 
-  Eigen::VectorXd ptsx(4);
-  Eigen::VectorXd ptsy(4);
-  ptsx << -100, -50, 0, 100;
-  ptsy << -1, -1, -1, -1;
+  Eigen::VectorXd ptsx(5);
+  Eigen::VectorXd ptsy(5);
+  ptsx <<-100, -10, 0, 50, 100;
+  ptsy << 5,  1, 1, 5,  100;
+
 
   // fit a polynomial to the above x and y coordinates
-  auto coeffs = polyfit(ptsx, ptsy, 2) ;
+  auto coeffs = polyfit(ptsx, ptsy, 4) ;
 
   // Calculate the initial state values for the problem
   double x = -1;
@@ -320,13 +355,15 @@ int main() {
   // calculate the cross track error
   //  It is calculated using the track as a reference
   double cte = polyeval(coeffs,x) - y;
-  // calculate the initial orientation error
+
+  // Calculate the initial orientation error for the objective function.
   // The objective orientation is given by : psi = tan(f'(x))
   // Here f(x) is a 2nd order poly
   // f'(x) = 2*coeffs[2] + coeffs[1]
-  double Df_y = 0.0;
-  for(int order=1; order<coeffs.size(); ++order){
-    Df_y += order*pow(x, (double) order-1.0);
+  double Df_y = coeffs[1]*x;
+  double x_power = x;
+  for(int deg=2; deg<coeffs.size(); ++deg){
+    Df_y += deg * coeffs[deg] * x_power;
   }
   double epsi =  -(tan(Df_y) - psi); //TODO: Not sure why orientation sign must be negated
 
@@ -336,6 +373,7 @@ int main() {
 
   std::vector<double> x_vals = {state[0]};
   std::vector<double> y_vals = {state[1]};
+  std::vector<double> y_interp_vals = {polyeval(coeffs,x)};
   std::vector<double> psi_vals = {state[2]};
   std::vector<double> v_vals = {state[3]};
   std::vector<double> cte_vals = {state[4]};
@@ -343,13 +381,26 @@ int main() {
   std::vector<double> delta_vals = {};
   std::vector<double> a_vals = {};
 
+  // This is to enforce actuation continuity between 2 invocations of the solver
+  double acc_last_value = 0.0;
+  double delta_last_value = 0.0;
+
   for (size_t i = 0; i < iters; i++) {
     std::cout << "Iteration " << i << std::endl;
 
-    auto vars = mpc.Solve(state, coeffs);
+    auto start = std::chrono::system_clock::now();
+
+    /* do some work */
+    auto vars = mpc.Solve(state, coeffs, acc_last_value, delta_last_value);
+
+    auto end = std::chrono::system_clock::now();
+    auto elapsed = (std::chrono::duration_cast<std::chrono::microseconds>) (end - start);
+    std::cout <<"elapsed.count:"<< elapsed.count()/1000 << " ms \n";
+
 
     x_vals.push_back(vars[0]);
     y_vals.push_back(vars[1]);
+    y_interp_vals.push_back(polyeval(coeffs,vars[0]));
     psi_vals.push_back(vars[2]);
     v_vals.push_back(vars[3]);
     cte_vals.push_back(vars[4]);
@@ -358,11 +409,14 @@ int main() {
     delta_vals.push_back(vars[6]);
     a_vals.push_back(vars[7]);
 
+    delta_last_value = vars[6];
+    acc_last_value = vars[7];
+
     state << vars[0], vars[1], vars[2], vars[3], vars[4], vars[5];
     std::cout << "x = " << vars[0] << std::endl;
     std::cout << "y = " << vars[1] << std::endl;
     std::cout << "psi = " << vars[2] << std::endl;
-    std::cout << "v = " << vars[3] << std::endl;
+    std::cout << "v = " << vars[v_start] << std::endl;
     std::cout << "cte = " << vars[4] << std::endl;
     std::cout << "epsi = " << vars[5] << std::endl;
     std::cout << "delta = " << vars[6] << std::endl;
@@ -373,15 +427,27 @@ int main() {
   // Plot values
   // NOTE: feel free to play around with this.
   // It's useful for debugging!
-  plt::subplot(3, 1, 1);
+  plt::subplot(2, 2, 1);
   plt::title("CTE");
+  plt::grid(true);
   plt::plot(cte_vals);
-  plt::subplot(3, 1, 2);
+  plt::subplot(2, 2, 2);
   plt::title("Delta (Radians)");
+  plt::grid(true);
   plt::plot(delta_vals);
-  plt::subplot(3, 1, 3);
+  plt::subplot(2, 2, 3);
   plt::title("Velocity");
+  plt::grid(true);
   plt::plot(v_vals);
+  plt::subplot(2, 2, 4);
+  plt::title("x VS y");
+  plt::grid(true);
+  plt::xlabel("x");
+  plt::ylabel("y");
+  plt::axis("equal");
+
+  plt::plot(x_vals, y_vals);
+  plt::plot(x_vals, y_interp_vals);
 
   plt::show();
 }
